@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
 NEAT Training Script with Iris Dataset
-Train the NEAT model on the classic Iris classification task
+Train the NEAT model on the classic Iris classification task using real CSV data
 """
-
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
-from sklearn.datasets import load_iris
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, classification_report
@@ -19,18 +17,19 @@ import sys
 import json
 from datetime import datetime
 
-# Add parent directory to path to import neat_main
+# Add parent directory to path to import neat_main and data loader
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from neat_main import NEATAgent, NEATTrainer
+from data.dataloader import CSVDataLoader
 
 class IrisNEATTrainer:
-    """NEAT trainer specifically designed for Iris dataset"""
+    """NEAT trainer specifically designed for Iris dataset using CSV data"""
     
     def __init__(self, num_agents=3, hidden_dim=64, learning_rate=0.001):
         self.num_agents = num_agents
         self.hidden_dim = hidden_dim
         self.learning_rate = learning_rate
-        self.scaler = StandardScaler()
+        self.data_loader = CSVDataLoader()
         self.load_data()
         
         # Initialize NEAT trainer
@@ -49,38 +48,47 @@ class IrisNEATTrainer:
         }
     
     def load_data(self):
-        """Load and preprocess Iris dataset"""
-        iris = load_iris()
-        X, y = iris.data, iris.target
-        
-        # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42, stratify=y
-        )
-        X_train, X_val, y_train, y_val = train_test_split(
-            X_train, y_train, test_size=0.2, random_state=42, stratify=y_train
+        """Load and preprocess Iris dataset from CSV file"""
+        # Load data using our CSV data loader
+        dataloaders, data_info = self.data_loader.load_and_prepare_iris(
+            batch_size=16,
+            normalize=True,
+            train_ratio=0.6,
+            val_ratio=0.2,
+            test_ratio=0.2
         )
         
-        # Normalize features
-        X_train = self.scaler.fit_transform(X_train)
-        X_val = self.scaler.transform(X_val)
-        X_test = self.scaler.transform(X_test)
+        # Store dataloaders
+        self.train_loader = dataloaders['train']
+        self.val_loader = dataloaders['val']
+        self.test_loader = dataloaders['test']
         
-        # Convert to tensors
-        self.X_train = torch.FloatTensor(X_train)
-        self.y_train = torch.LongTensor(y_train)
-        self.X_val = torch.FloatTensor(X_val)
-        self.y_val = torch.LongTensor(y_val)
-        self.X_test = torch.FloatTensor(X_test)
-        self.y_test = torch.LongTensor(y_test)
+        # Extract validation and test sets for evaluation
+        self.X_val = []
+        self.y_val = []
+        for batch_x, batch_y in self.val_loader:
+            self.X_val.append(batch_x)
+            self.y_val.append(batch_y)
+        self.X_val = torch.cat(self.X_val, dim=0)
+        self.y_val = torch.cat(self.y_val, dim=0)
         
-        # Create data loaders
-        train_dataset = TensorDataset(self.X_train, self.y_train)
-        self.train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+        self.X_test = []
+        self.y_test = []
+        for batch_x, batch_y in self.test_loader:
+            self.X_test.append(batch_x)
+            self.y_test.append(batch_y)
+        self.X_test = torch.cat(self.X_test, dim=0)
+        self.y_test = torch.cat(self.y_test, dim=0)
         
-        print(f"Training samples: {len(self.X_train)}")
-        print(f"Validation samples: {len(self.X_val)}")
-        print(f"Test samples: {len(self.X_test)}")
+        # Store data info
+        self.data_info = data_info
+        
+        print(f"Loaded Iris dataset from CSV:")
+        print(f"  Features: {data_info['feature_names']}")
+        print(f"  Classes: {data_info['class_names']}")
+        print(f"  Training samples: {len(self.train_loader.dataset)}")
+        print(f"  Validation samples: {len(self.X_val)}")
+        print(f"  Test samples: {len(self.X_test)}")
     
     def validate(self):
         """Evaluate model on validation set"""
@@ -153,8 +161,9 @@ class IrisNEATTrainer:
     def test(self):
         """Evaluate on test set"""
         # Load best model
-        if os.path.exists('models/best_model.pth'):
-            self.trainer.agents[0].load_state_dict(torch.load('models/best_model.pth'))
+        model_path = 'models/best_model.pth'
+        if os.path.exists(model_path):
+            self.trainer.agents[0].load_state_dict(torch.load(model_path))
         
         agent = self.trainer.agents[0]
         agent.eval()
@@ -163,11 +172,12 @@ class IrisNEATTrainer:
             outputs = agent(self.X_test)
             _, predicted = torch.max(outputs.data, 1)
             accuracy = accuracy_score(self.y_test.numpy(), predicted.numpy())
-            
+        
+        class_names = self.data_info['class_names']
         print(f"Test Accuracy: {accuracy:.4f}")
         print("\nClassification Report:")
         print(classification_report(self.y_test.numpy(), predicted.numpy(),
-                                    target_names=['Setosa', 'Versicolor', 'Virginica']))
+                                    target_names=class_names))
         
         return accuracy, predicted.numpy()
     
@@ -196,7 +206,8 @@ class IrisNEATTrainer:
         
         # Individual agent losses
         for i, agent_losses in enumerate(self.training_history['agent_losses']):
-            axes[1, 0].plot(agent_losses, label=f'Agent {i+1}')
+            if len(agent_losses) > 0:
+                axes[1, 0].plot(agent_losses, label=f'Agent {i+1}')
         axes[1, 0].set_title('Individual Agent Losses')
         axes[1, 0].set_xlabel('Batch')
         axes[1, 0].set_ylabel('Loss')
@@ -216,18 +227,21 @@ class IrisNEATTrainer:
             axes[1, 1].set_title('Nash Equilibrium Detection')
         
         plt.tight_layout()
-        plt.savefig('models/training_history.png', dpi=300, bbox_inches='tight')
+        os.makedirs('results', exist_ok=True)
+        plt.savefig('results/training_history.png', dpi=300, bbox_inches='tight')
         plt.show()
     
     def save_results(self, test_accuracy, predictions):
         """Save training results to JSON"""
         results = {
             'timestamp': datetime.now().isoformat(),
+            'data_source': 'data/iris.data (CSV)',
             'configuration': {
                 'num_agents': self.num_agents,
                 'hidden_dim': self.hidden_dim,
                 'learning_rate': self.learning_rate
             },
+            'data_info': self.data_info,
             'training_history': self.training_history,
             'test_accuracy': test_accuracy,
             'nash_equilibrium_count': len(self.training_history['nash_equilibrium_epochs']),
@@ -242,8 +256,8 @@ class IrisNEATTrainer:
 
 def main():
     """Main training function"""
-    print("NEAT Training on Iris Dataset")
-    print("=" * 40)
+    print("NEAT Training on Iris Dataset (CSV Data)")
+    print("=" * 50)
     
     # Initialize trainer
     trainer = IrisNEATTrainer(
@@ -270,6 +284,8 @@ def main():
     print("\nTraining completed successfully!")
     print(f"Final test accuracy: {test_accuracy:.4f}")
     print(f"Nash equilibrium achieved {len(history['nash_equilibrium_epochs'])} times")
+    print("Model saved as models/neat_iris_final.pth")
+    print("Training plots saved as results/training_history.png")
 
 if __name__ == "__main__":
     main()
